@@ -4,7 +4,9 @@
     @ngokienhoang
 */
 
-/**************************************************************** INCLUDE LIBRARY ****************************************************************/
+/***************************************************************************************************************************************************
+ *                                                              INCLUDE LIBRARY
+ * *************************************************************************************************************************************************/
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,8 +18,9 @@
 #include <pthread.h>
 #include <netdb.h>          // Để sử dụng các hàm gethostname/gethostbyname lấy địa chỉ IP của host
 
-/**************************************************************** DEFINE ****************************************************************/
-#define COMMAND_LENGTH  (30)
+/***************************************************************************************************************************************************
+ *                                                              DEFINES
+ * *************************************************************************************************************************************************/
 #define BUFFER_SIZE     (1024)
 #define MAX_CONNECTIONS (3)
 #define BOOL char
@@ -32,348 +35,52 @@ typedef struct {
     struct sockaddr_in address;
     pthread_t thread_id;
     int index;
-    BOOL bIsClient; // if connection is Client, bIsClient is TRUE
+    BOOL bIsClient; // nếu connection là Client --> bIsClient = TRUE
 } Connection;
 
-Connection C_PEERS[MAX_CONNECTIONS];
+/***************************************************************************************************************************************************
+ *                                                              GLOBAL VARIABES
+ * *************************************************************************************************************************************************/
+Connection C_PEERS[MAX_CONNECTIONS]; // Biến C_PEERS lưu lại tất cả thông tin các kết nối
 
-/**************************************************************** PROTOTYPES ****************************************************************/
-void print_menu(void);
-void print_command_manual(void);
-void error_code_handler(uint8_t u8ErrorCode);
-void command_handler(char param_cCommand[]);
-void client_handler(int p_socket_fd);
-static void *create_server_handler(void *args);
-
-/**************************************************************** GLOBAL VARIABES ****************************************************************/
 int server_socket = 0;
 int connection_cnt = 0;
 int listening_port = 0;
 char *IP_server = NULL;
-/**************************************************************** USEFULL FUNCTIONS ****************************************************************/
-void remove_connection(int index)
-{
-    close(C_PEERS[index].socket_fd);
 
-    for (int i = index; i < connection_cnt-1; i++)
-    {
-        C_PEERS[i]  = C_PEERS[i+1];
-        C_PEERS[i].index = i;
-    }
-    connection_cnt--;
-}
+/***************************************************************************************************************************************************
+ *                                                              PROTOTYPES
+ * *************************************************************************************************************************************************/
+/*
+    Command hander: help/myip/myport/connect/list/terminate/send/exit
+*/
+void cmd_help_handler(void);
+void cmd_myip_handler(void);
+void cmd_myport_handler(void);
+void cmd_connect_handler(const char *ip, int port);
+void cmd_list_handler(void);
+void cmd_terminate_handler(int connect_id);
+void cmd_send_handler(int connect_id, const char *message);
+void cmd_exit_handler(void);
 
-void notify_peer_disconnection(int socket_fd)
-{
-    /* Gửi gói tin Terminate cho socket cần ngắt kết nối */
-    const char *terminate_msg = "TERMINATE";
-    send(socket_fd, terminate_msg, strlen(terminate_msg), 0);
-}
+/*
+    Print functions
+*/
+void print_menu(void);
 
-void cmd_myport_handler(void)
-{
-    printf("This Chat Room is listening on port: %d\n", listening_port);
-}
+/*
+    Socket functions
+*/
+void remove_connection(int index);
+void notify_peer_disconnection(int socket_fd);
 
-void cmd_myip_handler(void)
-{
-    printf("IP address of this Chat Room: %s\n", IP_server);
-}
+void *ClientReceivedFromServer_fcn(void *arg);
+void* ServerReceivedFromClient_fcn(void *arg);
+void* SeverAcceptClient_handler(void *arg);
 
-void cmd_list_handler(void)
-{
-    printf("------------------ ACTIVE CONNECTIONS ------------------\n");
-    printf("ID                     IP Address               Port No.\n");
-    
-    if (0 == connection_cnt)
-    {
-        printf("* NOTE: Your connections list is empty!\n");
-    }
-    else
-    {
-        for (int i = 0; i<connection_cnt; i++)
-        {
-            printf("%d                  %s                  %d\n", 
-                i + 1,
-                inet_ntoa(C_PEERS[i].address.sin_addr),
-                ntohs(C_PEERS[i].address.sin_port));
-        }
-    }
-
-    printf("--------------------------------------------------------\n");
-}
-
-void cmd_send_handler(int connect_id, const char *message)
-{
-    int index = 0, ret = 0;
-
-    /* Kiểm tra connect_id có hợp lệ không */
-    if ( (connect_id < 1) || (connect_id > connection_cnt) )
-    {
-        printf("Invalid connection ID.\n");
-        return;
-    }
-
-    if (connect_id <= connection_cnt)
-    {
-        index = connect_id - 1;
-        ret = send(C_PEERS[index].socket_fd, message, strlen(message), 0);
-
-        if (0 > ret)
-        {
-            perror("Send failed");
-        }
-        else
-        {
-            printf("Message is sent to Chat Room %d [IP <%s> : Port <%d>] successfully.\n",
-                connect_id,
-                inet_ntoa(C_PEERS[index].address.sin_addr),
-                ntohs(C_PEERS[index].address.sin_port));
-        }
-        
-    }
-}
-
-void cmd_terminate_handler(int connect_id)
-{
-    int index = 0;
-
-    /* Kiểm tra connect_id có hợp lệ không */
-    if ( (connect_id < 1) || (connect_id > connection_cnt) )
-    {
-        printf("Invalid connection ID.\n");
-        return;
-    }
-
-    if (connect_id <= connection_cnt)
-    {
-        index = connect_id - 1;
-
-        /* Gửi thông báo đến socket được chỉ định bằng connect_id rằng sẽ hủy kết nối */
-        notify_peer_disconnection(C_PEERS[index].socket_fd);
-        
-        printf("Connection with Chat Room %d [IP <%s> : Port <%d>] is terminated.\n",
-            connect_id,
-            inet_ntoa(C_PEERS[index].address.sin_addr),
-            ntohs(C_PEERS[index].address.sin_port));
-        
-        remove_connection(index);
-    }
-}
-
-void *ClientReceivedFromServer_fcn(void *arg)
-{
-    int index = *(int *)arg;
-    free(arg);
-
-    char recv_buff[BUFFER_SIZE] = {0};
-    int bytes_read = 0;
-
-    if (FALSE == C_PEERS[index].bIsClient) // is Server
-    {
-        while(1)
-        {
-            bytes_read = recv(C_PEERS[index].socket_fd, recv_buff, BUFFER_SIZE, 0);
-            if (bytes_read > 0)
-            {
-                recv_buff[bytes_read] = '\0';
-
-                /* Kiểm tra xem có phải Client bị ngắt kết nối bởi lệnh "exit"/"terminate" không */
-                if (strcmp(recv_buff, "TERMINATE") == 0) 
-                {
-                    printf("The Chat Room at [IP <%s> : Port <%d>] has disconnected.\n",
-                           inet_ntoa(C_PEERS[index].address.sin_addr),
-                           ntohs(C_PEERS[index].address.sin_port));
-                    remove_connection(index);
-                    pthread_exit(NULL);
-                    break;
-                }
-                else
-                {
-                    printf("|---------------------- NEW MESSAGE! -------------------\n");
-                    printf("| @from: Chat Room IP <%s>\n", inet_ntoa(C_PEERS[index].address.sin_addr));
-                    printf("|        Chat Room Port No. <%d>\n", ntohs(C_PEERS[index].address.sin_port));
-                    printf("| @message: %s\n", recv_buff);
-                    printf("*-------------------------------------------------------\n");
-                }
-            }
-        }
-    }
-}
-
-void cmd_connect_handler(const char *ip, int port)
-{
-    int server_fd;
-    struct sockaddr_in serv_addr;
-
-    /* Kiểm tra xem số lượng kết nối hiện tại có vượt quá giới hạn không */
-    if (MAX_CONNECTIONS <= connection_cnt)
-    {
-        printf("Maximum connections reached. Cannot connect to more servers.\n");
-        return;
-    }
-
-    /* Kiểm tra xem có bị trùng lặp kết nối 2 lần không */
-    for (int i = 0; i < connection_cnt; i++) 
-    {
-        if ( (C_PEERS[i].address.sin_addr.s_addr == inet_addr(ip)) &&\
-            (C_PEERS[i].address.sin_port == htons(port)) )
-        {
-            printf("Connection to Chat Room [IP <%s> : Port <%d>] already exists.\n", ip, port);
-            return;
-        }
-    }
-
-    memset(&serv_addr, '0',sizeof(serv_addr));
-
-    /* Khởi tạo địa chỉ server */
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port   = htons(port);
-    if (inet_pton(AF_INET, ip, &serv_addr.sin_addr) == -1) 
-        handle_error("inet_pton()");
-    
-    /* Tạo socket */
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd == -1)
-        handle_error("socket()");
-    
-    /* Kết nối tới server*/
-    if (connect(server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == -1)
-        handle_error("connect()");
-
-    C_PEERS[connection_cnt].socket_fd = server_fd;
-    C_PEERS[connection_cnt].address = serv_addr;
-    C_PEERS[connection_cnt].index = connection_cnt;
-    C_PEERS[connection_cnt].bIsClient = FALSE;
-
-    printf("Connected to Chat Room [IP <%s> : Port <%d>] successfully.\n", ip, port);
-
-    int *index = malloc(sizeof(int));
-    *index = connection_cnt;
-    pthread_create(&C_PEERS[connection_cnt].thread_id, 
-        NULL, 
-        ClientReceivedFromServer_fcn, 
-        index);
-    connection_cnt++;
-}
-
-void cmd_exit_handler(void)
-{
-
-}
-
-void cmd_help_handler(void)
-{
-    printf("%-40s : %s\n", "01. help", "display user interface options or command manual.");
-    printf("%-40s : %s\n", "02. myip", "display IP address of your App.");
-    printf("%-40s : %s\n", "03. myport", "display listening port of your App.");
-    printf("%-40s : %s\n", "04. connect <destination> <port no>", "connect you to another peer's App to chat.");
-    printf("%-40s : %s\n", "05. list", "list all the connected peers.");
-    printf("%-40s : %s\n", "06. terminate <connection id.>", "terminate a connection with specified ID mentioned in the list.");
-    printf("%-40s : %s\n", "07. send <connection id.> <message>", "send message to a connection with specified ID mentioned in the list.");
-    printf("%-40s : %s\n", "08. exit", "close all connections and terminate this App.");
-}
-
-void print_menu(void)
-{
-#if 1
-    printf("######################################## WELCOME TO CHAT APPLICATION - 2025 ############################################\n");
-    printf(">> Main Menu:\n");
-    cmd_help_handler();
-    printf("------------------------------------------------------------------------------------------------------------------------\n");
-    printf("🛑 NOTE: You can use 'help' command to display this command manual again\n");
-    printf("------------------------------------------------------------------------------------------------------------------------\n");
-    printf("########################################################################################################################\n");
-#else
-    printf("---WELCOME TO CHAT APPLICATION - 2025!---\n");
-    cmd_help_handler();
-#endif
-}
-
-void* ServerReceivedFromClient_fcn(void *arg)
-{
-    int index = *(int *)arg;
-    free(arg);
-
-    char recv_buff[BUFFER_SIZE] = {0};
-    int bytes_read = 0;
-
-    if (TRUE == C_PEERS[index].bIsClient)
-    {
-        while(1)
-        {
-            bytes_read = recv(C_PEERS[index].socket_fd, recv_buff, BUFFER_SIZE, 0);
-            if (bytes_read > 0)
-            {
-                recv_buff[bytes_read] = '\0';
-
-                /* Kiểm tra xem có phải Client bị ngắt kết nối bởi lệnh "exit" không */
-                if (strcmp(recv_buff, "TERMINATE") == 0) 
-                {
-                    printf("The Chat Room at %s:%d has disconnected.\n",
-                           inet_ntoa(C_PEERS[index].address.sin_addr),
-                           ntohs(C_PEERS[index].address.sin_port));
-                    remove_connection(index);
-                    pthread_exit(NULL);
-                    break;
-                }
-                else
-                {
-                    printf("*---------------------- NEW MESSAGE! -------------------\n");
-                    printf("* @from: Chat Room IP <%s>\n", inet_ntoa(C_PEERS[index].address.sin_addr));
-                    printf("*        Chat Room Port No. <%d>\n", ntohs(C_PEERS[index].address.sin_port));
-                    printf("* @message: %s\n", recv_buff);
-                    printf("*-------------------------------------------------------\n");
-                }
-            }
-        }
-    }
-}
-
-void* SeverAcceptClient_handler(void *arg)
-{
-    while(1)
-    {
-        struct sockaddr_in client_address;
-        socklen_t addr_len = sizeof(client_address);
-
-        int client_socket = accept(server_socket, (struct sockaddr *)&client_address, &addr_len);
-
-        if (client_socket < 0) {
-            perror("Accept failed");
-            continue;
-        }
-
-        /* Kiểm tra xem số lượng kết nối đã bị vượt quá hay chưa */
-        if (connection_cnt >= MAX_CONNECTIONS) {
-            printf("Maximum connections reached. Connection rejected.\n");
-            close(client_socket);
-            continue;
-        }
-
-        C_PEERS[connection_cnt].socket_fd = client_socket;
-        C_PEERS[connection_cnt].address = client_address;
-        C_PEERS[connection_cnt].index = connection_cnt;
-        C_PEERS[connection_cnt].bIsClient = TRUE; // đây là 1 Client kết nối đến Server
-
-        printf("\nNew connection from Chat Room [IP <%s> : Port <%d>]\n",
-            inet_ntoa(client_address.sin_addr),
-            ntohs(client_address.sin_port));
-        
-        /* Tạo một thread riêng để Server nhận dữ liệu từ Client */
-        int *index = malloc(sizeof(int));
-        *index = connection_cnt;
-        pthread_create(&C_PEERS[connection_cnt].thread_id, 
-            NULL,
-            ServerReceivedFromClient_fcn,
-            index);
-        
-        /* Tăng biến đếm số lượng kết nối */
-        connection_cnt += 1;
-    }
-}
-
-/**************************************************************** MAIN FUNCTION ****************************************************************/
+/***************************************************************************************************************************************************
+ *                                                              MAIN FUNCTION
+ * *************************************************************************************************************************************************/
 
 int main(int argc, char* argv[])
 {
@@ -517,17 +224,10 @@ int main(int argc, char* argv[])
         /* 08. Lệnh exit */
         else if (0 == strcmp(cmd, "exit"))
         {
-            /* Gửi thông báo terminate đến toàn bộ các kết nối hiện có */
-            for (int i = 0; i < connection_cnt; i++)
-            {
-                notify_peer_disconnection(C_PEERS[i].socket_fd);
-                close(C_PEERS[i].socket_fd);
-            }
-
+            cmd_exit_handler();
             // Đóng socket server
             close(server_socket);
 
-            printf("Exiting Chat App...\n");
             return 0;
         }
         else
@@ -538,5 +238,330 @@ int main(int argc, char* argv[])
 
     return 0;
 }
-/**************************************************************** THREAD HANDLER ****************************************************************/
 
+/***************************************************************************************************************************************************
+ *                                                              USEFULL FUNCTIONS
+ * *************************************************************************************************************************************************/
+
+ void cmd_help_handler(void)
+{
+    printf("%-40s : %s\n", "01. help", "display user interface options or command manual.");
+    printf("%-40s : %s\n", "02. myip", "display IP address of your App.");
+    printf("%-40s : %s\n", "03. myport", "display listening port of your App.");
+    printf("%-40s : %s\n", "04. connect <destination> <port no>", "connect you to another peer's App to chat.");
+    printf("%-40s : %s\n", "05. list", "list all the connected peers.");
+    printf("%-40s : %s\n", "06. terminate <connection id.>", "terminate a connection with specified ID mentioned in the list.");
+    printf("%-40s : %s\n", "07. send <connection id.> <message>", "send message to a connection with specified ID mentioned in the list.");
+    printf("%-40s : %s\n", "08. exit", "close all connections and terminate this App.");
+}
+
+void cmd_myip_handler(void)
+{
+    printf("IP address of this Chat Room: %s\n", IP_server);
+}
+
+void cmd_myport_handler(void)
+{
+    printf("This Chat Room is listening on port: %d\n", listening_port);
+}
+
+void cmd_connect_handler(const char *ip, int port)
+{
+    int server_fd;
+    struct sockaddr_in serv_addr;
+
+    /* Kiểm tra xem số lượng kết nối hiện tại có vượt quá giới hạn không */
+    if (MAX_CONNECTIONS <= connection_cnt)
+    {
+        printf("Maximum connections reached. Cannot connect to more servers.\n");
+        return;
+    }
+
+    /* Kiểm tra xem có bị trùng lặp kết nối 2 lần không */
+    for (int i = 0; i < connection_cnt; i++) 
+    {
+        if ( (C_PEERS[i].address.sin_addr.s_addr == inet_addr(ip)) &&\
+            (C_PEERS[i].address.sin_port == htons(port)) )
+        {
+            printf("Connection to Chat Room [IP <%s> : Port <%d>] already exists.\n", ip, port);
+            return;
+        }
+    }
+
+    memset(&serv_addr, '0',sizeof(serv_addr));
+
+    /* Khởi tạo địa chỉ server */
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port   = htons(port);
+    if (inet_pton(AF_INET, ip, &serv_addr.sin_addr) == -1) 
+        handle_error("inet_pton()");
+    
+    /* Tạo socket */
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd == -1)
+        handle_error("socket()");
+    
+    /* Kết nối tới server*/
+    if (connect(server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == -1)
+        handle_error("connect()");
+
+    C_PEERS[connection_cnt].socket_fd = server_fd;
+    C_PEERS[connection_cnt].address = serv_addr;
+    C_PEERS[connection_cnt].index = connection_cnt;
+    C_PEERS[connection_cnt].bIsClient = FALSE;
+
+    printf("Connected to Chat Room [IP <%s> : Port <%d>] successfully.\n", ip, port);
+
+    int *index = malloc(sizeof(int));
+    *index = connection_cnt;
+    pthread_create(&C_PEERS[connection_cnt].thread_id, 
+        NULL, 
+        ClientReceivedFromServer_fcn, 
+        index);
+    connection_cnt++;
+}
+
+void cmd_list_handler(void)
+{
+    printf("------------------ ACTIVE CONNECTIONS ------------------\n");
+    printf("ID                     IP Address               Port No.\n");
+    
+    if (0 == connection_cnt)
+    {
+        printf("* NOTE: Your connections list is empty!\n");
+    }
+    else
+    {
+        for (int i = 0; i<connection_cnt; i++)
+        {
+            printf("%d                  %s                  %d\n", 
+                i + 1,
+                inet_ntoa(C_PEERS[i].address.sin_addr),
+                ntohs(C_PEERS[i].address.sin_port));
+        }
+    }
+
+    printf("--------------------------------------------------------\n");
+}
+
+void cmd_terminate_handler(int connect_id)
+{
+    int index = 0;
+
+    /* Kiểm tra connect_id có hợp lệ không */
+    if ( (connect_id < 1) || (connect_id > connection_cnt) )
+    {
+        printf("Invalid connection ID.\n");
+        return;
+    }
+
+    if (connect_id <= connection_cnt)
+    {
+        index = connect_id - 1;
+
+        /* Gửi thông báo đến socket được chỉ định bằng connect_id rằng sẽ hủy kết nối */
+        notify_peer_disconnection(C_PEERS[index].socket_fd);
+        
+        printf("Connection with Chat Room %d [IP <%s> : Port <%d>] is terminated.\n",
+            connect_id,
+            inet_ntoa(C_PEERS[index].address.sin_addr),
+            ntohs(C_PEERS[index].address.sin_port));
+        
+        remove_connection(index);
+    }
+}
+
+void cmd_send_handler(int connect_id, const char *message)
+{
+    int index = 0, ret = 0;
+
+    /* Kiểm tra connect_id có hợp lệ không */
+    if ( (connect_id < 1) || (connect_id > connection_cnt) )
+    {
+        printf("Invalid connection ID.\n");
+        return;
+    }
+
+    if (connect_id <= connection_cnt)
+    {
+        index = connect_id - 1;
+        ret = send(C_PEERS[index].socket_fd, message, strlen(message), 0);
+
+        if (0 > ret)
+        {
+            perror("Send failed");
+        }
+        else
+        {
+            printf("Message is sent to Chat Room %d [IP <%s> : Port <%d>] successfully.\n",
+                connect_id,
+                inet_ntoa(C_PEERS[index].address.sin_addr),
+                ntohs(C_PEERS[index].address.sin_port));
+        }
+        
+    }
+}
+
+void cmd_exit_handler(void)
+{
+    /* Gửi thông báo terminate đến toàn bộ các kết nối hiện có */
+    for (int i = 0; i < connection_cnt; i++)
+    {
+        notify_peer_disconnection(C_PEERS[i].socket_fd);
+        close(C_PEERS[i].socket_fd);
+    }
+    printf("Exiting Chat App...\n");
+}
+
+void print_menu(void)
+{
+    printf("######################################## WELCOME TO CHAT APPLICATION - 2025 ############################################\n");
+    printf(">> Main Menu:\n");
+    cmd_help_handler();
+    printf("------------------------------------------------------------------------------------------------------------------------\n");
+    printf("🛑 NOTE: You can use 'help' command to display this command manual again\n");
+    printf("------------------------------------------------------------------------------------------------------------------------\n");
+    printf("########################################################################################################################\n");
+}
+
+ void remove_connection(int index)
+{
+    close(C_PEERS[index].socket_fd);
+
+    for (int i = index; i < connection_cnt-1; i++)
+    {
+        C_PEERS[i]  = C_PEERS[i+1];
+        C_PEERS[i].index = i;
+    }
+    connection_cnt--;
+}
+
+void notify_peer_disconnection(int socket_fd)
+{
+    /* Gửi gói tin Terminate cho socket cần ngắt kết nối */
+    const char *terminate_msg = "TERMINATE";
+    send(socket_fd, terminate_msg, strlen(terminate_msg), 0);
+}
+
+void *ClientReceivedFromServer_fcn(void *arg)
+{
+    int index = *(int *)arg;
+    free(arg);
+
+    char recv_buff[BUFFER_SIZE] = {0};
+    int bytes_read = 0;
+
+    if (FALSE == C_PEERS[index].bIsClient) // is Server
+    {
+        while(1)
+        {
+            bytes_read = recv(C_PEERS[index].socket_fd, recv_buff, BUFFER_SIZE, 0);
+            if (bytes_read > 0)
+            {
+                recv_buff[bytes_read] = '\0';
+
+                /* Kiểm tra xem có phải Client bị ngắt kết nối bởi lệnh "exit"/"terminate" không */
+                if (strcmp(recv_buff, "TERMINATE") == 0) 
+                {
+                    printf("The Chat Room at [IP <%s> : Port <%d>] has disconnected.\n",
+                           inet_ntoa(C_PEERS[index].address.sin_addr),
+                           ntohs(C_PEERS[index].address.sin_port));
+                    remove_connection(index);
+                    pthread_exit(NULL);
+                    break;
+                }
+                else
+                {
+                    printf("|---------------------- NEW MESSAGE! -------------------\n");
+                    printf("| @from: Chat Room IP <%s>\n", inet_ntoa(C_PEERS[index].address.sin_addr));
+                    printf("|        Chat Room Port No. <%d>\n", ntohs(C_PEERS[index].address.sin_port));
+                    printf("| @message: %s\n", recv_buff);
+                    printf("*-------------------------------------------------------\n");
+                }
+            }
+        }
+    }
+}
+
+void* ServerReceivedFromClient_fcn(void *arg)
+{
+    int index = *(int *)arg;
+    free(arg);
+
+    char recv_buff[BUFFER_SIZE] = {0};
+    int bytes_read = 0;
+
+    if (TRUE == C_PEERS[index].bIsClient)
+    {
+        while(1)
+        {
+            bytes_read = recv(C_PEERS[index].socket_fd, recv_buff, BUFFER_SIZE, 0);
+            if (bytes_read > 0)
+            {
+                recv_buff[bytes_read] = '\0';
+
+                /* Kiểm tra xem có phải Client bị ngắt kết nối bởi lệnh "exit" không */
+                if (strcmp(recv_buff, "TERMINATE") == 0) 
+                {
+                    printf("The Chat Room at %s:%d has disconnected.\n",
+                           inet_ntoa(C_PEERS[index].address.sin_addr),
+                           ntohs(C_PEERS[index].address.sin_port));
+                    remove_connection(index);
+                    pthread_exit(NULL);
+                    break;
+                }
+                else
+                {
+                    printf("*---------------------- NEW MESSAGE! -------------------\n");
+                    printf("* @from: Chat Room IP <%s>\n", inet_ntoa(C_PEERS[index].address.sin_addr));
+                    printf("*        Chat Room Port No. <%d>\n", ntohs(C_PEERS[index].address.sin_port));
+                    printf("* @message: %s\n", recv_buff);
+                    printf("*-------------------------------------------------------\n");
+                }
+            }
+        }
+    }
+}
+
+void* SeverAcceptClient_handler(void *arg)
+{
+    while(1)
+    {
+        struct sockaddr_in client_address;
+        socklen_t addr_len = sizeof(client_address);
+
+        int client_socket = accept(server_socket, (struct sockaddr *)&client_address, &addr_len);
+
+        if (client_socket < 0) {
+            perror("Accept failed");
+            continue;
+        }
+
+        /* Kiểm tra xem số lượng kết nối đã bị vượt quá hay chưa */
+        if (connection_cnt >= MAX_CONNECTIONS) {
+            printf("Maximum connections reached. Connection rejected.\n");
+            close(client_socket);
+            continue;
+        }
+
+        C_PEERS[connection_cnt].socket_fd = client_socket;
+        C_PEERS[connection_cnt].address = client_address;
+        C_PEERS[connection_cnt].index = connection_cnt;
+        C_PEERS[connection_cnt].bIsClient = TRUE; // đây là 1 Client kết nối đến Server
+
+        printf("\nNew connection from Chat Room [IP <%s> : Port <%d>]\n",
+            inet_ntoa(client_address.sin_addr),
+            ntohs(client_address.sin_port));
+        
+        /* Tạo một thread riêng để Server nhận dữ liệu từ Client */
+        int *index = malloc(sizeof(int));
+        *index = connection_cnt;
+        pthread_create(&C_PEERS[connection_cnt].thread_id, 
+            NULL,
+            ServerReceivedFromClient_fcn,
+            index);
+        
+        /* Tăng biến đếm số lượng kết nối */
+        connection_cnt += 1;
+    }
+}
