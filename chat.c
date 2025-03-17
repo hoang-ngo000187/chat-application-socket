@@ -9,11 +9,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <arpa/inet.h> // Để sử dụng inet_pton
-#include <netinet/in.h> // Để sử dụng sockaddr_in
-#include <sys/socket.h> // Để sử dụng socket
+#include <arpa/inet.h>      // Để sử dụng inet_pton
+#include <netinet/in.h>     // Để sử dụng sockaddr_in
+#include <sys/socket.h>     // Để sử dụng socket
 #include <unistd.h>
 #include <pthread.h>
+#include <netdb.h>          // Để sử dụng các hàm gethostname/gethostbyname lấy địa chỉ IP của host
 
 /**************************************************************** DEFINE ****************************************************************/
 #define COMMAND_LENGTH  (30)
@@ -47,7 +48,8 @@ static void *create_server_handler(void *args);
 /**************************************************************** GLOBAL VARIABES ****************************************************************/
 int server_socket = 0;
 int connection_cnt = 0;
-
+int listening_port = 0;
+char *IP_server = NULL;
 /**************************************************************** USEFULL FUNCTIONS ****************************************************************/
 void remove_connection(int index)
 {
@@ -66,6 +68,16 @@ void notify_peer_disconnection(int socket_fd)
     /* Gửi gói tin Terminate cho socket cần ngắt kết nối */
     const char *terminate_msg = "TERMINATE";
     send(socket_fd, terminate_msg, strlen(terminate_msg), 0);
+}
+
+void cmd_myport_handler(void)
+{
+    printf("This Chat Room is listening on port: %d\n", listening_port);
+}
+
+void cmd_myip_handler(void)
+{
+    printf("IP address of this Chat Room: %s\n", IP_server);
 }
 
 void cmd_list_handler(void)
@@ -380,6 +392,7 @@ int main(int argc, char* argv[])
     else
     {
         port_no = atoi(argv[1]);
+        listening_port = port_no; // gán biến global listening_port bằng port_no, dùng để in ra khi dùng lệnh myport
     }
 
     memset(&server_address, 0, sizeof(server_address ));
@@ -394,7 +407,10 @@ int main(int argc, char* argv[])
     /* 01.1 - Init server information */
     server_address.sin_family = AF_INET;
     server_address.sin_port = htons(port_no); // convert to network byte order (MSB)
-    server_address.sin_addr.s_addr = INADDR_ANY; // inet_addr("192.168.49.128")
+    server_address.sin_addr.s_addr = inet_addr("192.168.49.128"); //INADDR_ANY; // inet_addr("192.168.49.128")
+
+    // Chuyển IP của server về dạng chuỗi, gán cho biến global IP_server, dùng để in ra khi dùng lệnh myip
+    IP_server = inet_ntoa(server_address.sin_addr);
 
     /* 02. Binding */
     if (bind(server_socket, (struct sockaddr *)&server_address, sizeof(server_address)) < 0) {
@@ -407,7 +423,7 @@ int main(int argc, char* argv[])
         perror("Listen failed");
         return 1;
     }
-
+    
     /* 04. In ra menu lần đầu tiên chạy chương trình */
     print_menu();
     printf("This Chat Room is listening on port %d...\n", port_no);
@@ -430,16 +446,24 @@ int main(int argc, char* argv[])
         if (NULL == cmd)
             continue;
         
-        if (0 == strcmp(cmd, "list"))
-        {
-            cmd_list_handler();
-        }
-        else if (0 == strcmp(cmd, "help"))
+        /* 01. Lệnh help */
+        if (0 == strcmp(cmd, "help"))
         {
             printf("-------------------- COMMANDS MANUALS ------------------\n");
             cmd_help_handler();
             printf("--------------------------------------------------------\n");
         }
+        /* 02. Lệnh myip */
+        else if (0 == strcmp(cmd, "myip"))
+        {
+            cmd_myip_handler();
+        }
+        /* 03. Lệnh myport */
+        else if (0 == strcmp(cmd, "myport"))
+        {
+            cmd_myport_handler();
+        }
+        /* 04. Lệnh connect <destination> <port no> */
         else if (0 == strcmp(cmd, "connect")) // Kiểm tra xem token đầu tiên (cmd) có phải "connect" hay không.
         {
             /* Lấy tiếp hai token tiếp theo
@@ -456,6 +480,26 @@ int main(int argc, char* argv[])
             port_connect_no = atoi(port_connect);
             cmd_connect_handler(ip_connect, port_connect_no);
         }
+        /* 03. Lệnh list */
+        else if (0 == strcmp(cmd, "list"))
+        {
+            cmd_list_handler();
+        }
+        /* 06. Lệnh terminate <connection id> */
+        else if (0 == strcmp(cmd, "terminate"))
+        {
+            id_str = strtok(NULL, " ");
+
+            if (NULL == id_str)
+            {
+                printf("Usage: terminate <connection_id>\n");
+                continue;
+            }
+            
+            connect_id = atoi(id_str);
+            cmd_terminate_handler(connect_id);
+        }
+        /* 07. Lệnh send <connection id.> <message> */
         else if (0 == strcmp(cmd, "send"))
         {
             id_str = strtok(NULL, " ");
@@ -470,19 +514,7 @@ int main(int argc, char* argv[])
             connect_id = atoi(id_str);
             cmd_send_handler(connect_id, message);
         }
-        else if (0 == strcmp(cmd, "terminate"))
-        {
-            id_str = strtok(NULL, " ");
-
-            if (NULL == id_str)
-            {
-                printf("Usage: terminate <connection_id>\n");
-                continue;
-            }
-            
-            connect_id = atoi(id_str);
-            cmd_terminate_handler(connect_id);
-        }
+        /* 08. Lệnh exit */
         else if (0 == strcmp(cmd, "exit"))
         {
             /* Gửi thông báo terminate đến toàn bộ các kết nối hiện có */
